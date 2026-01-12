@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>3D 第一人稱：單層鏡面方塊聚落</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: sans-serif; }
+        #instructions {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: black;
+            background: rgba(255, 255, 255, 0.85);
+            padding: 20px;
+            text-align: center; cursor: pointer; z-index: 100; border-radius: 10px;
+            border: 2px solid #333;
+            box-shadow: 0 0 10px rgba(0,0,0,0.2);
+        }
+        #crosshair {
+            position: absolute; top: 50%; left: 50%; width: 10px; height: 10px;
+            border: 2px solid black;
+            border-radius: 50%; transform: translate(-50%, -50%);
+            pointer-events: none; z-index: 50;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="instructions">
+        <h1>點擊開始</h1>
+        <p>單層方塊聚落 (無垂直堆疊)<br>WASD 移動 | Shift 蹲下 | 空白鍵 跳躍</p>
+    </div>
+    <div id="crosshair"></div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+
+        // --- 1. 場景基礎設定 ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0xe0e0e0);
+        scene.fog = new THREE.Fog(0xe0e0e0, 20, 100);
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        const controls = new PointerLockControls(camera, document.body);
+        const instructions = document.getElementById('instructions');
+        instructions.addEventListener('click', () => controls.lock());
+        controls.addEventListener('lock', () => instructions.style.display = 'none');
+        controls.addEventListener('unlock', () => instructions.style.display = 'block');
+
+        // --- 2. 物理變數 ---
+        const STAND_HEIGHT = 1.6;
+        const SNEAK_HEIGHT = 0.8;
+        const PLAYER_RADIUS = 0.5;
+        let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false, canJump = false;
+        let isSneaking = false;
+        let currentHeight = STAND_HEIGHT;
+        const velocity = new THREE.Vector3();
+        const objects = []; 
+        const mirrorObjects = [];
+
+        // --- 3. 鍵盤監聽 ---
+        document.addEventListener('keydown', (e) => {
+            switch (e.code) {
+                case 'KeyW': moveForward = true; break;
+                case 'KeyA': moveLeft = true; break;
+                case 'KeyS': moveBackward = true; break;
+                case 'KeyD': moveRight = true; break;
+                case 'Space': if (canJump) { velocity.y += 20; canJump = false; } break;
+                case 'ShiftLeft': isSneaking = true; break;
+            }
+        });
+        document.addEventListener('keyup', (e) => {
+            switch (e.code) {
+                case 'KeyW': moveForward = false; break;
+                case 'KeyA': moveLeft = false; break;
+                case 'KeyS': moveBackward = false; break;
+                case 'KeyD': moveRight = false; break;
+                case 'ShiftLeft': isSneaking = false; break;
+            }
+        });
+
+        // --- 4. 環境光與地板 ---
+        const light = new THREE.HemisphereLight(0xffffff, 0x888888, 1.5);
+        scene.add(light);
+        const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+        dirLight.position.set(5, 10, 7);
+        scene.add(dirLight);
+
+        const floor = new THREE.Mesh(
+            new THREE.PlaneGeometry(200, 200), 
+            new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.8, metalness: 0.1 })
+        );
+        floor.rotation.x = -Math.PI / 2;
+        scene.add(floor);
+
+        const grid = new THREE.GridHelper(200, 50, 0x000000, 0xdddddd);
+        grid.position.y = 0.01;
+        scene.add(grid);
+
+        // --- 5. 鏡面方塊生成 (移除堆疊邏輯) ---
+        
+        function createMirrorBox(x, y, z, width, height, depth) {
+            const geometry = new THREE.BoxGeometry(width, height, depth);
+            const cubeRenderTarget = new THREE.WebGLCubeRenderTarget(128); 
+            const cubeCamera = new THREE.CubeCamera(0.1, 500, cubeRenderTarget);
+            
+            const mirrorMaterial = new THREE.MeshStandardMaterial({
+                color: 0xffffff,
+                metalness: 1,
+                roughness: 0.02,
+                envMap: cubeRenderTarget.texture,
+                transparent: false
+            });
+
+            const box = new THREE.Mesh(geometry, mirrorMaterial);
+            box.position.set(x, y, z);
+
+            const edges = new THREE.EdgesGeometry(geometry);
+            const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x000000 }));
+            box.add(line);
+
+            scene.add(box);
+            scene.add(cubeCamera);
+            
+            objects.push(box);
+            mirrorObjects.push({ mesh: box, camera: cubeCamera });
+        }
+
+        const numBoxes = 15;  // 總共生成幾個方塊
+        const range = 25;     // 生成範圍
+        const boxWidth = 4;   // 方塊寬度
+        const boxHeight = 3;  // 方塊高度 (固定)
+
+        const existingPositions = []; 
+
+        for (let i = 0; i < numBoxes; i++) {
+            let posX, posZ;
+            let validPosition = false;
+            let attempts = 0;
+
+            // 尋找位置 (保持邊緣重疊邏輯)
+            while (!validPosition && attempts < 100) {
+                posX = (Math.random() - 0.5) * range; 
+                posZ = (Math.random() - 0.5) * range;
+                
+                // 1. 避開出生點 (半徑 4)
+                if (Math.abs(posX) < 4 && Math.abs(posZ) < 4) {
+                    attempts++;
+                    continue;
+                }
+
+                // 2. 檢查重疊
+                let overlap = false;
+                for (const pos of existingPositions) {
+                    const dx = posX - pos.x;
+                    const dz = posZ - pos.z;
+                    const dist = Math.sqrt(dx * dx + dz * dz);
+
+                    // 距離小於 3.0 代表重疊太多 -> 拒絕
+                    // 距離大於 3.0 且小於 4.0 -> 邊緣重疊 -> 允許
+                    if (dist < 3.0) { 
+                        overlap = true;
+                        break;
+                    }
+                }
+
+                if (!overlap) {
+                    validPosition = true;
+                }
+                attempts++;
+            }
+
+            if (validPosition) {
+                existingPositions.push({ x: posX, z: posZ });
+                
+                // 【修改重點】移除 Layer 迴圈，只生成一個方塊在地面
+                // Y 軸位置 = 高度的一半 (確保底部貼地)
+                const posY = boxHeight / 2;
+                
+                createMirrorBox(posX, posY, posZ, boxWidth, boxHeight, boxWidth);
+            }
+        }
+
+        // --- 6. 碰撞偵測 ---
+        function checkCollision(targetPos) {
+            let collision = false;
+            let currentFloorY = 0;
+            for (const obj of objects) {
+                const halfWidth = obj.geometry.parameters.width / 2;
+                const halfDepth = obj.geometry.parameters.depth / 2;
+                
+                const boxMinX = obj.position.x - halfWidth;
+                const boxMaxX = obj.position.x + halfWidth;
+                const boxMinZ = obj.position.z - halfDepth;
+                const boxMaxZ = obj.position.z + halfDepth;
+                const boxTop = obj.position.y + obj.geometry.parameters.height / 2;
+
+                const isInsideX = targetPos.x + PLAYER_RADIUS > boxMinX && targetPos.x - PLAYER_RADIUS < boxMaxX;
+                const isInsideZ = targetPos.z + PLAYER_RADIUS > boxMinZ && targetPos.z - PLAYER_RADIUS < boxMaxZ;
+                
+                if (isInsideX && isInsideZ) {
+                    if (targetPos.y >= boxTop + 0.1) {
+                        currentFloorY = Math.max(currentFloorY, boxTop);
+                    } else {
+                        collision = true;
+                    }
+                }
+            }
+            return { collision, floorY: currentFloorY };
+        }
+
+        // --- 7. 主動畫迴圈 ---
+        let prevTime = performance.now();
+        function animate() {
+            requestAnimationFrame(animate);
+            if (controls.isLocked) {
+                const time = performance.now();
+                const delta = (time - prevTime) / 1000;
+
+                // 物理
+                velocity.x -= velocity.x * 10.0 * delta;
+                velocity.z -= velocity.z * 10.0 * delta;
+                velocity.y -= 9.8 * 5.0 * delta;
+
+                const currentSpeed = isSneaking ? 80.0 : 350.0;
+                const moveDir = new THREE.Vector3();
+                moveDir.z = Number(moveForward) - Number(moveBackward);
+                moveDir.x = Number(moveRight) - Number(moveLeft);
+                moveDir.normalize();
+
+                if (moveForward || moveBackward) velocity.z -= moveDir.z * currentSpeed * delta;
+                if (moveLeft || moveRight) velocity.x -= moveDir.x * currentSpeed * delta;
+
+                const playerObj = controls.getObject();
+                const oldPos = playerObj.position.clone();
+                
+                controls.moveRight(-velocity.x * delta);
+                controls.moveForward(-velocity.z * delta);
+                
+                if (checkCollision(playerObj.position).collision) {
+                    playerObj.position.x = oldPos.x;
+                    playerObj.position.z = oldPos.z;
+                }
+
+                const targetH = isSneaking ? SNEAK_HEIGHT : STAND_HEIGHT;
+                currentHeight = THREE.MathUtils.lerp(currentHeight, targetH, delta * 10);
+
+                playerObj.position.y += (velocity.y * delta);
+                let groundInfo = checkCollision(playerObj.position);
+
+                if (playerObj.position.y <= groundInfo.floorY + currentHeight) {
+                    velocity.y = 0;
+                    playerObj.position.y = groundInfo.floorY + currentHeight;
+                    canJump = true;
+                } else {
+                    canJump = false;
+                }
+
+                // 更新鏡面
+                mirrorObjects.forEach(obj => {
+                    obj.mesh.visible = false;
+                    obj.camera.position.copy(obj.mesh.position);
+                    obj.camera.update(renderer, scene);
+                    obj.mesh.visible = true;
+                });
+
+                prevTime = time;
+            }
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
