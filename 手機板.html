@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>3D 第一人稱：手機版 (搖桿顏色修正)</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: sans-serif; touch-action: none; }
+        
+        /* UI 層 */
+        #ui-container {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none; 
+            z-index: 100;
+        }
+
+        /* 虛擬搖桿區域 (左下) */
+        #joystick-zone {
+            position: absolute; bottom: 20px; left: 20px; width: 150px; height: 150px;
+            pointer-events: auto; 
+        }
+
+        /* 視角滑動區域 (右半邊螢幕) */
+        #touch-look-zone {
+            position: absolute; top: 0; right: 0; width: 50%; height: 100%;
+            pointer-events: auto;
+        }
+
+        /* 按鈕群組 (右下) */
+        .btn-group {
+            position: absolute; bottom: 30px; right: 30px;
+            display: flex; flex-direction: column; gap: 15px;
+            pointer-events: auto;
+        }
+
+        .game-btn {
+            width: 70px; height: 70px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.5);
+            border: 2px solid white;
+            color: black; font-weight: bold; font-size: 14px;
+            display: flex; align-items: center; justify-content: center;
+            user-select: none;
+        }
+        .game-btn:active { background: rgba(255, 255, 255, 0.9); }
+        .active-toggle { background: rgba(180, 45, 80, 0.6); border-color: rgba(180, 45, 80, 0.6); }
+
+        /* 暫停/退出按鈕 (左上角，灰色) */
+        #btn-pause {
+            position: absolute; top: 20px; left: 20px;
+            width: 100px; height: 40px;
+            background: rgba(180, 45, 80, 0.6);
+            color: white;
+            border: 2px solid rgba(180, 45, 80, 0.6);
+            border-radius: 8px;
+            font-weight: bold;
+            display: flex; align-items: center; justify-content: center;
+            pointer-events: auto;
+            user-select: none;
+        }
+        #btn-pause:active { background: rgba(180, 45, 80, 0.6); }
+
+        /* 初始畫面 */
+        #instructions {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: black; background: rgba(227, 190, 200, 0.7); padding: 20px;
+            text-align: center; cursor: pointer; z-index: 200; border-radius: 10px;
+            border: 2px solid #333; pointer-events: auto;
+            width: 300px;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/nipplejs/0.10.1/nipplejs.min.js"></script>
+</head>
+<body>
+
+    <div id="instructions">
+        <h1>鏡像迷宮</h1>
+        <p>點擊開始</p>
+        
+    </div>
+
+    <div id="ui-container" style="display:none;">
+        <div id="btn-pause">暫停 / 退出</div>
+        <div id="joystick-zone"></div>
+        <div id="touch-look-zone"></div>
+        <div class="btn-group">
+            <div id="btn-jump" class="game-btn">跳躍</div>
+            <div id="btn-sneak" class="game-btn">蹲下</div>
+        </div>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // --- 1. 場景基礎設定 ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0xe0e0e0);
+        scene.fog = new THREE.Fog(0xe0e0e0, 20, 80);
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 500);
+        camera.rotation.order = 'YXZ'; 
+
+        const renderer = new THREE.WebGLRenderer({ antialias: false });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.shadowMap.enabled = true; 
+        document.body.appendChild(renderer.domElement);
+
+        // --- 2. 變數 ---
+        let isGameActive = false;
+        const STAND_HEIGHT = 1.6;
+        const SNEAK_HEIGHT = 0.8;
+        const PLAYER_RADIUS = 0.5;
+        
+        let moveForward = 0, moveRight = 0;
+        let canJump = false;
+        let isSneaking = false;
+        let currentHeight = STAND_HEIGHT;
+        const velocity = new THREE.Vector3();
+        let rotX = 0, rotY = 0;
+
+        const objects = []; 
+        const mirrorObjects = [];
+        const particles = [];
+
+        // --- 3. UI 與事件 ---
+        const instructions = document.getElementById('instructions');
+        const uiContainer = document.getElementById('ui-container');
+        let joystickInitialized = false; 
+
+        instructions.addEventListener('click', () => {
+            instructions.style.display = 'none';
+            uiContainer.style.display = 'block';
+            isGameActive = true;
+            prevTime = performance.now(); 
+            if (!joystickInitialized) {
+                initJoystick();
+                joystickInitialized = true;
+            }
+        });
+
+        // 暫停按鈕邏輯
+        const pauseBtn = document.getElementById('btn-pause');
+        pauseBtn.addEventListener('touchstart', (e) => {
+            e.preventDefault(); 
+            isGameActive = false; 
+            
+            uiContainer.style.display = 'none';
+            instructions.style.display = 'block';
+            instructions.querySelector('h1').innerText = "點擊開始"; // 恢復標題
+            
+            // 重置角色位置到原點 (如果您希望退出的話)
+            camera.position.set(0, 1.6, 0);
+            camera.rotation.set(0, 0, 0);
+            rotX = 0;
+            rotY = 0;
+            
+            moveForward = 0;
+            moveRight = 0;
+        });
+
+        // 搖桿 (顏色修正位置)
+        function initJoystick() {
+            const joystick = nipplejs.create({
+                zone: document.getElementById('joystick-zone'),
+                mode: 'static',
+                position: { left: '50%', top: '50%' },
+                // 【修改】這裡改成紅色，您也可以改成 'gray' 或 '#555555'
+                color: 'red' 
+            });
+            joystick.on('move', (evt, data) => {
+                const forward = Math.sin(data.angle.radian);
+                const right = Math.cos(data.angle.radian);
+                const speed = Math.min(data.force, 1.0); 
+                moveForward = forward * speed;
+                moveRight = right * speed;
+            });
+            joystick.on('end', () => {
+                moveForward = 0;
+                moveRight = 0;
+            });
+        }
+
+        // 觸控轉視角
+        const lookZone = document.getElementById('touch-look-zone');
+        let lastTouchX = 0;
+        let lastTouchY = 0;
+
+        lookZone.addEventListener('touchstart', (e) => {
+            lastTouchX = e.touches[0].clientX;
+            lastTouchY = e.touches[0].clientY;
+        }, { passive: false });
+
+        lookZone.addEventListener('touchmove', (e) => {
+            if (!isGameActive) return;
+            e.preventDefault(); 
+            const touchX = e.touches[0].clientX;
+            const touchY = e.touches[0].clientY;
+            const deltaX = touchX - lastTouchX;
+            const deltaY = touchY - lastTouchY;
+            const sensitivity = 0.005;
+            rotY -= deltaX * sensitivity; 
+            rotX -= deltaY * sensitivity; 
+            rotX = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, rotX));
+            camera.rotation.x = rotX;
+            camera.rotation.y = rotY;
+            lastTouchX = touchX;
+            lastTouchY = touchY;
+        }, { passive: false });
+
+        // 按鈕
+        document.getElementById('btn-jump').addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            if (canJump && isGameActive) { velocity.y += 20; canJump = false; }
+        });
+
+        const sneakBtn = document.getElementById('btn-sneak');
+        sneakBtn.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            if (!isGameActive) return;
+            isSneaking = !isSneaking; 
+            if(isSneaking) sneakBtn.classList.add('active-toggle');
+            else sneakBtn.classList.remove('active-toggle');
+        });
+
+        // --- 4. 場景物件 ---
+        const light = new THREE.HemisphereLight(0xffffff, 0x888888, 1.5);
+        scene.add(light);
+        const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+        dirLight.position.set(5, 10, 7);
+        scene.add(dirLight);
+
+        const floor = new THREE.Mesh(
+            new THREE.PlaneGeometry(200, 200), 
+            new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.8, metalness: 0.1 })
+        );
+        floor.rotation.x = -Math.PI / 2;
+        scene.add(floor);
+        const grid = new THREE.GridHelper(200, 50, 0x000000, 0xdddddd);
+        grid.position.y = 0.01;
+        scene.add(grid);
+
+        const playerGeo = new THREE.CapsuleGeometry(0.3, 1.0, 8, 16); 
+        const playerMat = new THREE.MeshStandardMaterial({
+            color: 0x888888, transparent: true, opacity: 0.4,
+            roughness: 0.7, metalness: 0.1
+        });
+        const playerMesh = new THREE.Mesh(playerGeo, playerMat);
+        playerMesh.layers.set(1); 
+        scene.add(playerMesh);
+
+        const particleGeometry = new THREE.SphereGeometry(0.06, 6, 6);
+        const particleMaterial = new THREE.MeshStandardMaterial({ 
+            color: 0xcccccc, transparent: true, opacity: 0.9,
+            roughness: 1.0, metalness: 0.0, side: THREE.DoubleSide
+        });
+
+        function createMirrorBox(x, y, z, width, height, depth) {
+            const geometry = new THREE.BoxGeometry(width, height, depth);
+            const cubeRenderTarget = new THREE.WebGLCubeRenderTarget(128); 
+            const cubeCamera = new THREE.CubeCamera(0.1, 100, cubeRenderTarget);
+            cubeCamera.layers.enable(1);
+            const mirrorMaterial = new THREE.MeshStandardMaterial({
+                color: 0xffffff, metalness: 1, roughness: 0.05,
+                envMap: cubeRenderTarget.texture, transparent: false
+            });
+            const box = new THREE.Mesh(geometry, mirrorMaterial);
+            box.position.set(x, y, z);
+            const edges = new THREE.EdgesGeometry(geometry);
+            const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x000000 }));
+            box.add(line);
+            scene.add(box);
+            scene.add(cubeCamera);
+            objects.push(box);
+            mirrorObjects.push({ mesh: box, camera: cubeCamera });
+        }
+
+        const numBoxes = 10;
+        const range = 25;
+        const boxWidth = 4;
+        const boxHeight = 3;
+        const existingPositions = []; 
+
+        for (let i = 0; i < numBoxes; i++) {
+            let posX, posZ, validPosition = false, attempts = 0;
+            while (!validPosition && attempts < 100) {
+                posX = (Math.random() - 0.5) * range; 
+                posZ = (Math.random() - 0.5) * range;
+                if (Math.abs(posX) < 4 && Math.abs(posZ) < 4) { attempts++; continue; }
+                let overlap = false;
+                for (const pos of existingPositions) {
+                    const dist = Math.sqrt((posX - pos.x)**2 + (posZ - pos.z)**2);
+                    if (dist < 3.0) { overlap = true; break; }
+                }
+                if (!overlap) validPosition = true;
+                attempts++;
+            }
+            if (validPosition) {
+                existingPositions.push({ x: posX, z: posZ });
+                createMirrorBox(posX, boxHeight / 2, posZ, boxWidth, boxHeight, boxWidth);
+            }
+        }
+
+        function checkCollision(targetPos) {
+            let collision = false;
+            let currentFloorY = 0;
+            for (const obj of objects) {
+                const halfW = obj.geometry.parameters.width / 2;
+                const halfD = obj.geometry.parameters.depth / 2;
+                const boxMinX = obj.position.x - halfW; const boxMaxX = obj.position.x + halfW;
+                const boxMinZ = obj.position.z - halfD; const boxMaxZ = obj.position.z + halfD;
+                const boxTop = obj.position.y + obj.geometry.parameters.height / 2;
+                if (targetPos.x + PLAYER_RADIUS > boxMinX && targetPos.x - PLAYER_RADIUS < boxMaxX &&
+                    targetPos.z + PLAYER_RADIUS > boxMinZ && targetPos.z - PLAYER_RADIUS < boxMaxZ) {
+                    if (targetPos.y >= boxTop + 0.1) currentFloorY = Math.max(currentFloorY, boxTop);
+                    else collision = true;
+                }
+            }
+            return { collision, floorY: currentFloorY };
+        }
+
+        function createParticle(pos, floorY) {
+            const p = new THREE.Mesh(particleGeometry, particleMaterial.clone());
+            p.position.set(pos.x, floorY + 0.06, pos.z);
+            p.userData.life = 0.8; 
+            scene.add(p);
+            particles.push(p);
+        }
+
+        // --- 5. 主迴圈 ---
+        let prevTime = performance.now();
+        function animate() {
+            requestAnimationFrame(animate);
+            if (!isGameActive) {
+                renderer.render(scene, camera);
+                return;
+            }
+
+            const time = performance.now();
+            const delta = (time - prevTime) / 1000;
+            
+            // 物理
+            velocity.x -= velocity.x * 20.0 * delta;
+            velocity.z -= velocity.z * 20.0 * delta;
+            velocity.y -= 9.8 * 5.0 * delta;
+
+            const currentSpeed = isSneaking ? 80.0 : 200.0;
+            const forwardVec = new THREE.Vector3();
+            const rightVec = new THREE.Vector3();
+            camera.getWorldDirection(forwardVec);
+            forwardVec.y = 0; forwardVec.normalize();
+            rightVec.crossVectors(forwardVec, camera.up).normalize();
+
+            if (moveForward !== 0) {
+                velocity.x += forwardVec.x * moveForward * currentSpeed * delta;
+                velocity.z += forwardVec.z * moveForward * currentSpeed * delta;
+            }
+            if (moveRight !== 0) {
+                velocity.x += rightVec.x * moveRight * currentSpeed * delta;
+                velocity.z += rightVec.z * moveRight * currentSpeed * delta;
+            }
+
+            const oldPos = camera.position.clone();
+            camera.position.x += velocity.x * delta;
+            camera.position.z += velocity.z * delta;
+
+            if (checkCollision(camera.position).collision) {
+                camera.position.x = oldPos.x;
+                camera.position.z = oldPos.z;
+            }
+
+            const targetH = isSneaking ? SNEAK_HEIGHT : STAND_HEIGHT;
+            currentHeight = THREE.MathUtils.lerp(currentHeight, targetH, delta * 10);
+            
+            camera.position.y += velocity.y * delta;
+            let groundInfo = checkCollision(camera.position);
+
+            if (camera.position.y <= groundInfo.floorY + currentHeight) {
+                velocity.y = 0;
+                camera.position.y = groundInfo.floorY + currentHeight;
+                canJump = true;
+                if (Math.abs(velocity.x) > 0.5 || Math.abs(velocity.z) > 0.5) {
+                    createParticle(camera.position, groundInfo.floorY);
+                }
+            } else {
+                canJump = false;
+            }
+
+            playerMesh.position.x = camera.position.x;
+            playerMesh.position.z = camera.position.z;
+            playerMesh.position.y = (camera.position.y - currentHeight) + 0.8;
+
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.userData.life -= delta;
+                p.material.opacity = p.userData.life;
+                if (p.userData.life <= 0) {
+                    scene.remove(p);
+                    particles.splice(i, 1);
+                }
+            }
+
+            mirrorObjects.forEach(obj => {
+                obj.mesh.visible = false;
+                obj.camera.position.copy(obj.mesh.position);
+                obj.camera.update(renderer, scene);
+                obj.mesh.visible = true;
+            });
+
+            prevTime = time;
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
